@@ -1,6 +1,6 @@
 {
   "name": "freshvault",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Your Obsidian vault is Claude's memory — local semantic search over your notes via MCP, always fresh, never reindex.",
   "type": "module",
   "bin": {

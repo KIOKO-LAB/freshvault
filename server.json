@@ -6,12 +6,12 @@
     "url": "https://github.com/KIOKO-LAB/freshvault",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registry_type": "npm",
       "identifier": "freshvault",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
         "type": "stdio"
       },
