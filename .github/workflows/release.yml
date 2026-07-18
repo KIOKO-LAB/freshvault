@@ -15,7 +15,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
+          # NOTE: no registry-url here — it writes an (empty) _authToken into
+          # .npmrc, which silently breaks OIDC trusted publishing.
       - run: npm ci
       - run: npm test
       # Publish: try Trusted Publishing (OIDC, tokenless) first; fall back to
@@ -27,9 +28,12 @@ jobs:
         run: npm publish --access public
       - name: Publish (token fallback)
         if: steps.oidc.outcome == 'failure'
-        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
+          echo "token authenticates as: $(npm whoami || echo '<invalid token>')"
+          npm publish --access public
 
       # Publish to the official MCP registry (aggregators auto-sync from it)
       - name: Install mcp-publisher
