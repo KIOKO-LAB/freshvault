@@ -18,10 +18,18 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm test
-      # Trusted Publishing (OIDC): no token needed. Requires npm >= 11.5.1
-      # and the repo+workflow registered as a Trusted Publisher on npmjs.com.
+      # Publish: try Trusted Publishing (OIDC, tokenless) first; fall back to
+      # NPM_TOKEN if the trusted publisher isn't configured. Whichever exists wins.
       - run: npm install -g npm@latest
-      - run: npm publish --access public
+      - name: Publish (OIDC trusted publishing)
+        id: oidc
+        continue-on-error: true
+        run: npm publish --access public
+      - name: Publish (token fallback)
+        if: steps.oidc.outcome == 'failure'
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Publish to the official MCP registry (aggregators auto-sync from it)
       - name: Install mcp-publisher
