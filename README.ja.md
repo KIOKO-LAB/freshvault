@@ -61,11 +61,15 @@ Claude にノートのことを聞くだけです:
 
 ツールは 3 つ、すべて読み取り専用です:
 
-| tool | what it does |
+| ツール | 説明 |
 |---|---|
-| `search_notes` | hybrid semantic search — finds meaning, not just keywords |
-| `get_note_context` | reads a full note after a search hit (path-traversal safe) |
-| `index_status` | freshness report: notes/chunks, last sync, watcher state |
+| `search_notes` | セマンティック検索 + 任意の `folder` / `tags` / `modified_after` / `modified_before` による絞り込み。タイトル完全一致はブースト |
+| `get_note_context` | ノート全文 + ボルトのリンクグラフに基づくバックリンク/アウトリンク(パストラバーサル対策済み) |
+| `index_status` | 鮮度レポート: ノート/チャンク数、除外ファイル数、最終同期、ウォッチャー状態 |
+
+他のツールが設定画面や有料プランの向こうに隠している絞り込み検索が、ここではクエリ単位でそのまま使えます:
+
+> 「#project タグ付きで 6 月以降に更新されたノートから予算の議論を検索して」
 
 ## 仕組み
 
@@ -111,18 +115,19 @@ FRESHVAULT_EMBED_API=openai FRESHVAULT_EMBED_URL=http://localhost:1234 npx -y fr
 | — | `FRESHVAULT_EMBED_API` | `ollama` (or `openai`) |
 | — | `FRESHVAULT_EMBED_URL` | `http://localhost:1234` (openai mode) |
 | — | `FRESHVAULT_EMBED_KEY` | none (openai mode, optional) |
+| — | `FRESHVAULT_IGNORE` | none — e.g. `Templates/,Daily/**` (or `ignore: []` in config) |
 
 コマンド: `setup` · `serve` (デフォルト) · `index` (手動の逃げ道) · `status`
 
 ## ベンチマーク
 
-韓国語検索のマイクロベンチマークをリポジトリに同梱しています(`node scripts/bench.mjs`) — 韓国語ノート 30 件・パラフレーズクエリ 40 件で、埋め込みモデルの top-1/MRR を比較します。結果は [docs/ko-bench.md](docs/ko-bench.md) にあります。
+韓国語検索のマイクロベンチマークをリポジトリに同梱しています(`node scripts/bench.mjs`) — 韓国語ノート 30 件・パラフレーズクエリ 40 件で、埋め込みモデルの top-1/MRR を比較します。結果と bge-m3-ko(top-1 85.0%、634MB)のインポートガイドは [docs/ko-bench.md](docs/ko-bench.md) にあります。
 
 ## ロードマップ
 
-- `bge-m3-ko` ファインチューニングオプション + 公開ベンチマークの拡充
 - ワンクリックで Claude Desktop にインストールできる MCPB バンドル
 - 大規模ボルト向けのリランキングパス
+- インデックス時の PDF テキスト抽出
 
 ## ライセンス
 

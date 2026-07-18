@@ -12,8 +12,23 @@ node scripts/bench.mjs bge-m3 nomic-embed-text
 
 | model | top-1 | MRR | note |
 |---|---|---|---|
-| **bge-m3** (freshvault default) | **82.5%** | **0.894** | multilingual, ~1.2GB |
+| **bge-m3-ko** (Korean fine-tune) | **85.0%** | **0.917** | best for Korean vaults — and only 634MB (Q8) |
+| **bge-m3** (freshvault default) | 82.5% | 0.894 | multilingual, ~1.2GB |
 | nomic-embed-text (common Ollama default) | 10.0% | 0.189 | English-only — near-random on Korean |
+
+### Using bge-m3-ko (Korean vaults, ~10 min)
+
+[dragonkue/BGE-m3-ko](https://huggingface.co/dragonkue/BGE-m3-ko) isn't on the Ollama library, but community GGUFs import cleanly:
+
+```bash
+curl -L -o bge-m3-ko.Q8_0.gguf \
+  "https://huggingface.co/NeuroWhAI/BGE-m3-ko-gguf/resolve/main/BGE-M3-567M-Q8_0.gguf"
+printf 'FROM ./bge-m3-ko.Q8_0.gguf\n' > Modelfile
+ollama create bge-m3-ko -f Modelfile
+FRESHVAULT_MODEL=bge-m3-ko npx -y freshvault index   # or set model in config
+```
+
+(Changing the model auto-invalidates the old index — it rebuilds on next boot.)
 
 `nomic-embed-text` is the de-facto default in most local RAG tutorials and tools. On Korean paraphrase queries it retrieves the right note **1 time in 10**. This is why freshvault defaults to `bge-m3`.
 

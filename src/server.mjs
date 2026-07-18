@@ -138,7 +138,7 @@ export async function runServer(cfg) {
 
   // --- MCP surface -----------------------------------------------------------
   const server = new Server(
-    { name: "freshvault", version: "0.2.0" },
+    { name: "freshvault", version: "0.3.0" },
     { capabilities: { tools: {} } }
   );
   server.onclose = () => shutdown("transport closed");
@@ -157,6 +157,10 @@ export async function runServer(cfg) {
           properties: {
             query: { type: "string", description: "What to look for (natural language)" },
             top_k: { type: "number", description: "Number of chunks to return (default 5)", default: 5 },
+            folder: { type: "string", description: "Optional: only search under this vault folder, e.g. 'work/projects'" },
+            tags: { type: "array", items: { type: "string" }, description: "Optional: only notes carrying any of these tags (inline #tags or frontmatter)" },
+            modified_after: { type: "string", description: "Optional ISO date — only notes modified after this" },
+            modified_before: { type: "string", description: "Optional ISO date — only notes modified before this" },
           },
           required: ["query"],
         },
@@ -205,8 +209,21 @@ export async function runServer(cfg) {
             : "The vault index is empty. If the server just started on a fresh vault, indexing may still be in progress — try again shortly, or check index_status."
         );
       }
+      // Validate date filters loudly — silently ignoring them would return
+      // results the caller wrongly believes are date-filtered.
+      for (const k of ["modified_after", "modified_before"]) {
+        if (args[k] != null && Number.isNaN(Date.parse(args[k]))) {
+          return text(`Invalid ${k}: "${args[k]}" — use an ISO date like 2026-07-01.`);
+        }
+      }
       try {
-        const results = await searchNotes(db, cfg, String(args.query ?? ""), clampTopK(args.top_k));
+        const results = await searchNotes(db, cfg, String(args.query ?? ""), clampTopK(args.top_k), {
+          folder: args.folder,
+          // tolerate a bare string where the schema says array
+          tags: Array.isArray(args.tags) ? args.tags : args.tags ? [args.tags] : undefined,
+          modifiedAfter: args.modified_after,
+          modifiedBefore: args.modified_before,
+        });
         return text(formatResults(results, db, state));
       } catch (e) {
         return text(`Search failed: ${e.message}\nIf your embedding server (Ollama or OpenAI-compatible) is not running, start it and try again.`);
@@ -233,8 +250,23 @@ export async function runServer(cfg) {
         }
         const raw = await readFile(abs, "utf8");
         const capped = raw.length > 12000 ? raw.slice(0, 12000) + `\n\n[…truncated — note is ${raw.length} chars]` : raw;
-        const inIndex = db.records.filter(r => r.path === rel).length;
-        return text(`# ${rel}\n(${raw.length} chars · ${inIndex} indexed chunks)\n\n${capped}`);
+        const chunkCount = db.records.filter(r => r.path === rel).length;
+        const title = rel.replace(/\.md$/, "");
+        const noteName = title.split("/").pop();
+        // link graph from the per-note metadata map. Obsidian resolves
+        // [[wikilinks]] case-insensitively and without .md — match likewise.
+        const outlinks = db.files[rel]?.links ?? [];
+        const targets = new Set([noteName.toLowerCase(), title.toLowerCase()]);
+        const backlinks = Object.entries(db.files)
+          .filter(([p, meta]) => p !== rel && meta.links?.some(
+            l => targets.has(l.toLowerCase().replace(/\.md$/, ""))
+          ))
+          .map(([p]) => p);
+        const graph = [
+          outlinks.length ? `outlinks: ${outlinks.join(", ")}` : null,
+          backlinks.length ? `backlinks: ${backlinks.join(", ")}` : null,
+        ].filter(Boolean).join("\n");
+        return text(`# ${rel}\n(${raw.length} chars · ${chunkCount} indexed chunks)\n${graph ? graph + "\n" : ""}\n${capped}`);
       } catch (e) {
         return text(`Could not read "${rel}": ${e.code === "ENOENT" ? "note does not exist (was it renamed/deleted?)" : e.message}`);
       }
@@ -245,7 +277,7 @@ export async function runServer(cfg) {
       const noteCount = Object.keys(db.files).length;
       const lines = [
         `vault: ${cfg.vault}`,
-        `notes: ${noteCount} · chunks: ${db.records.length}`,
+        `notes: ${noteCount} · chunks: ${db.records.length}${db.excluded ? ` · excluded by ignore patterns: ${db.excluded}` : ""}`,
         `last successful sync: ${db.lastSync ?? "never"}`,
         `last check: ${state.lastReconcileAt ? `${Math.round((Date.now() - state.lastReconcileAt) / 1000)}s ago` : "not yet"}`,
         `role: ${state.role}${state.role === "writer" ? ` · watcher: ${state.watcher?.recursiveOk ? "recursive" : "sweep-only"}` : " (another process indexes)"}`,

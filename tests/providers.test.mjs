@@ -3,7 +3,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { embed } from "../src/ollama.mjs";
-import { lexicalScores, tokenize, searchNotes } from "../src/search.mjs";
+import { searchNotes } from "../src/search.mjs";
 import { mockEmbed, startMockOllama } from "./helpers/mock-ollama.mjs";
 
 let openaiMock, ollamaMock;
@@ -44,15 +44,12 @@ test("openai provider: batch embed, order restored", async () => {
   assert.deepEqual(b, mockEmbed("charlie delta"));
 });
 
-test("hybrid: lexical component rescues exact rare terms", async () => {
+test("dense search finds exact rare terms (bag-of-words mock)", async () => {
   const records = [
     { title: "notes-a", path: "a.md", chunk: 0, text: "general thoughts about cooking pasta and sauces", vector: mockEmbed("general thoughts about cooking pasta and sauces") },
     { title: "notes-b", path: "b.md", chunk: 0, text: "the API key for XYZZY-9000 service lives in the env file", vector: mockEmbed("the API key for XYZZY-9000 service lives in the env file") },
   ];
-  const lex = lexicalScores(records, tokenize("XYZZY-9000"));
-  assert.ok(lex[1] > lex[0], "exact-term note must win lexically");
-
-  const db = { records, files: { "a.md": 1, "b.md": 1 } };
+  const db = { records, files: { "a.md": { mtime: 1 }, "b.md": { mtime: 1 } } };
   const cfg = { embedApi: "ollama", ollamaUrl: ollamaMock.url, model: "mock-model" };
   const results = await searchNotes(db, cfg, "XYZZY-9000", 2);
   assert.equal(results[0].path, "b.md");

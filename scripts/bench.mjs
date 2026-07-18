@@ -9,7 +9,37 @@ import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { embed, cosine } from "../src/ollama.mjs";
-import { lexicalScores, tokenize } from "../src/search.mjs";
+
+// BM25-lite lives HERE, not in product code — it exists only to reproduce the
+// "we measured hybrid fusion and it hurt" receipts in docs/ko-bench.md.
+function tokenize(text) {
+  return (String(text).toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+}
+function lexicalScores(records, queryTokens) {
+  const N = records.length || 1;
+  const docTokens = records.map(r => tokenize(`${r.title} ${r.text}`));
+  const avgLen = docTokens.reduce((s, t) => s + t.length, 0) / N || 1;
+  const df = new Map();
+  for (const qt of new Set(queryTokens)) {
+    let n = 0;
+    for (const toks of docTokens) if (toks.includes(qt)) n++;
+    df.set(qt, n);
+  }
+  const k1 = 1.2, b = 0.75;
+  return docTokens.map(toks => {
+    let score = 0;
+    const len = toks.length || 1;
+    for (const qt of new Set(queryTokens)) {
+      const n = df.get(qt) ?? 0;
+      if (n === 0) continue;
+      const tf = toks.filter(t => t === qt).length;
+      if (tf === 0) continue;
+      const idf = Math.log(1 + (N - n + 0.5) / (n + 0.5));
+      score += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (len / avgLen)));
+    }
+    return score;
+  });
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const models = process.argv.slice(2).length ? process.argv.slice(2) : ["bge-m3", "nomic-embed-text"];

@@ -63,9 +63,13 @@ Three tools, all read-only:
 
 | tool | what it does |
 |---|---|
-| `search_notes` | semantic search — finds meaning, not just keywords |
-| `get_note_context` | reads a full note after a search hit (path-traversal safe) |
-| `index_status` | freshness report: notes/chunks, last sync, watcher state |
+| `search_notes` | semantic search + optional `folder` / `tags` / `modified_after` / `modified_before` scoping; exact-title lookups boosted |
+| `get_note_context` | full note + its backlinks/outlinks from the vault link graph (path-traversal safe) |
+| `index_status` | freshness report: notes/chunks, excluded count, last sync, watcher state |
+
+Scoped queries competitors gate behind settings or paywalls work per-query here:
+
+> "Search my notes tagged #project modified after June for the budget discussion"
 
 ## How it works
 
@@ -111,18 +115,19 @@ Everything works with zero config after `setup`. Override when needed:
 | — | `FRESHVAULT_EMBED_API` | `ollama` (or `openai`) |
 | — | `FRESHVAULT_EMBED_URL` | `http://localhost:1234` (openai mode) |
 | — | `FRESHVAULT_EMBED_KEY` | none (openai mode, optional) |
+| — | `FRESHVAULT_IGNORE` | none — e.g. `Templates/,Daily/**` (or `ignore: []` in config) |
 
 Commands: `setup` · `serve` (default) · `index` (manual escape hatch) · `status`
 
 ## Benchmark
 
-A Korean retrieval micro-benchmark ships in-repo (`node scripts/bench.mjs`) — 30 Korean notes, 40 paraphrase queries, comparing embedding models on top-1/MRR. Results in [docs/ko-bench.md](docs/ko-bench.md).
+A Korean retrieval micro-benchmark ships in-repo (`node scripts/bench.mjs`) — 30 Korean notes, 40 paraphrase queries, comparing embedding models on top-1/MRR. Results and the bge-m3-ko (85.0% top-1, 634MB) import guide in [docs/ko-bench.md](docs/ko-bench.md).
 
 ## Roadmap
 
-- `bge-m3-ko` fine-tune option + expanded published benchmark
 - MCPB bundle for one-click Claude Desktop install
 - Reranking pass for large vaults
+- PDF text extraction at index time
 
 ## License
 

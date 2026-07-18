@@ -8,7 +8,7 @@ export const DEFAULT_MODEL = "bge-m3";
 export const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 export const CHUNK_CHARS = 1000;
 export const CHUNK_OVERLAP = 150;
-export const INDEX_VERSION = 3; // v3: vectors in Float32 .bin sidecar (was inline JSON)
+export const INDEX_VERSION = 4; // v4: records carry tags/links/mtime (v3: Float32 sidecar)
 
 export function configDir() {
   if (platform() === "win32") {
@@ -70,6 +70,10 @@ export function loadConfig(cliOpts = {}) {
   if (file.embedKey) {
     console.error("[freshvault] warning: embedKey in config.json is ignored — set FRESHVAULT_EMBED_KEY in the environment instead");
   }
+  // Ignore patterns (gitignore-lite globs matched against vault-relative paths):
+  // env FRESHVAULT_IGNORE="Templates/,Daily/**" or config file `ignore: [...]`.
+  const ignore = (process.env.FRESHVAULT_IGNORE?.split(",").map(s => s.trim()).filter(Boolean))
+    ?? (Array.isArray(file.ignore) ? file.ignore : []);
   return {
     vault: vault ? resolve(vault) : null,
     model,
@@ -77,6 +81,7 @@ export function loadConfig(cliOpts = {}) {
     embedApi,
     embedUrl,
     embedKey,
+    ignore,
     dataDir: data,
     indexPath: vault ? indexPathFor(vault, data) : null,
   };
