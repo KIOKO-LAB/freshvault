@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.kioko-lab/freshvault",
+  "name": "io.github.KIOKO-LAB/freshvault",
   "description": "Local semantic search over your Obsidian vault - always fresh, never reindex.",
   "repository": {
     "url": "https://github.com/KIOKO-LAB/freshvault",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "freshvault",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "transport": {
         "type": "stdio"
       },

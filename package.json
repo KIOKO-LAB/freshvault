@@ -1,6 +1,6 @@
 {
   "name": "freshvault",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Your Obsidian vault is Claude's memory — local semantic search over your notes via MCP, always fresh, never reindex.",
   "type": "module",
   "bin": {
@@ -30,7 +30,7 @@
     "embeddings",
     "memory"
   ],
-  "mcpName": "io.github.kioko-lab/freshvault",
+  "mcpName": "io.github.KIOKO-LAB/freshvault",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/KIOKO-LAB/freshvault.git"
