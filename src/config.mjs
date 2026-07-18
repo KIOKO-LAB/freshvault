@@ -8,7 +8,7 @@ export const DEFAULT_MODEL = "bge-m3";
 export const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 export const CHUNK_CHARS = 1000;
 export const CHUNK_OVERLAP = 150;
-export const INDEX_VERSION = 1;
+export const INDEX_VERSION = 2; // v2: files map stores {mtime, size} (was bare mtime)
 
 export function configDir() {
   if (platform() === "win32") {

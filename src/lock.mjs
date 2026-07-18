@@ -1,8 +1,20 @@
-// Single-writer election via a pid lockfile next to the index file.
-// Multiple MCP clients (Claude Code + Desktop) may spawn servers on the same vault;
-// exactly one becomes the writer (indexes), the rest are readers (hot-reload).
+// Single-writer election via a heartbeated pid lockfile next to the index file.
+// Multiple MCP clients (Claude Code + Desktop) may spawn servers on the same
+// vault; exactly one becomes the writer (indexes), the rest are readers.
+//
+// Staleness is decided by BOTH signals:
+//  - pid liveness (fast path: dead pid → stale immediately)
+//  - heartbeat age (a lock not refreshed within LOCK_STALE_MS is stale even if
+//    the pid "exists" — covers pid recycling after crash/reboot, EPERM pids,
+//    and SIGKILLed writers)
+// The writer refreshes the lock every HEARTBEAT_MS; if the refresh discovers
+// another pid in the file (lost a steal race), it reports failure so the server
+// can demote itself — guaranteeing at most one writer settles.
 import { writeFileSync, readFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+
+export const HEARTBEAT_MS = 60_000;
+export const LOCK_STALE_MS = 3 * HEARTBEAT_MS;
 
 export function lockPathFor(indexPath) {
   return `${indexPath}.lock`;
@@ -17,39 +29,82 @@ function pidAlive(pid) {
   }
 }
 
+function payload() {
+  return JSON.stringify({ pid: process.pid, started: Date.now(), updated: Date.now() });
+}
+
+function readHolder(lockPath) {
+  try {
+    return JSON.parse(readFileSync(lockPath, "utf8"));
+  } catch {
+    return null; // missing or unreadable/corrupt
+  }
+}
+
+function holderIsFresh(holder) {
+  if (!holder || typeof holder.pid !== "number") return false;
+  if (!pidAlive(holder.pid)) return false;
+  const beat = holder.updated ?? holder.started ?? 0;
+  return Date.now() - beat < LOCK_STALE_MS;
+}
+
 /** Try to become the writer. Returns true if we hold the lock. */
 export function acquireLock(indexPath) {
   const lockPath = lockPathFor(indexPath);
   mkdirSync(dirname(lockPath), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      writeFileSync(lockPath, JSON.stringify({ pid: process.pid, started: Date.now() }), { flag: "wx" });
-      return true;
+      writeFileSync(lockPath, payload(), { flag: "wx" });
+      // TOCTOU guard: a concurrent staler may have unlinked our fresh lock and
+      // written its own — only trust the lock if the file still names us.
+      return readHolder(lockPath)?.pid === process.pid;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      let holder = null;
+      if (holderIsFresh(readHolder(lockPath))) return false; // live writer exists
       try {
-        holder = JSON.parse(readFileSync(lockPath, "utf8"));
-      } catch { /* unreadable → treat as stale */ }
-      if (holder && pidAlive(holder.pid)) return false; // live writer exists
-      try {
-        unlinkSync(lockPath); // stale (dead pid) → steal and retry
+        unlinkSync(lockPath); // stale → steal and retry
       } catch { /* raced with another stealer */ }
     }
   }
   return false;
 }
 
-export function releaseLock(indexPath) {
+/**
+ * Writer heartbeat: refresh `updated`. Returns false if we no longer own the
+ * lock (steal race lost) — caller must demote to reader.
+ */
+export function heartbeatLock(indexPath) {
   const lockPath = lockPathFor(indexPath);
+  const holder = readHolder(lockPath);
+  if (holder && holder.pid !== process.pid) return false; // someone else owns it
   try {
-    const holder = JSON.parse(readFileSync(lockPath, "utf8"));
-    if (holder.pid === process.pid) unlinkSync(lockPath);
-  } catch { /* already gone */ }
+    if (holder) {
+      writeFileSync(lockPath, JSON.stringify({ ...holder, updated: Date.now() }));
+    } else {
+      writeFileSync(lockPath, payload(), { flag: "wx" }); // vanished → reclaim
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-/** Best-effort release on process death. */
+export function releaseLock(indexPath) {
+  const lockPath = lockPathFor(indexPath);
+  const holder = readHolder(lockPath);
+  if (holder?.pid === process.pid) {
+    try {
+      unlinkSync(lockPath);
+    } catch { /* already gone */ }
+  }
+}
+
+let exitHookInstalled = false;
+
+/** Best-effort release on process death. Idempotent. */
 export function releaseOnExit(indexPath) {
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
   const release = () => releaseLock(indexPath);
   process.on("exit", release);
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {

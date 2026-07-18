@@ -1,5 +1,8 @@
-// Incremental vault indexer: walk → mtime diff → chunk → embed → atomic save.
-import { readdir, readFile, writeFile, stat, rename, mkdir } from "node:fs/promises";
+// Incremental vault indexer: walk → mtime+size diff → chunk → embed → atomic save.
+// reconcile() is TRANSACTIONAL: the db is only mutated after all embeddings
+// succeed, so an Ollama outage mid-reconcile never loses notes — the same drift
+// is simply detected again on the next attempt.
+import { readdir, readFile, writeFile, stat, rename, mkdir, realpath } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, relative, dirname, sep } from "node:path";
 import { CHUNK_CHARS, CHUNK_OVERLAP, INDEX_VERSION } from "./config.mjs";
@@ -9,6 +12,13 @@ const EMBED_BATCH = 32;
 
 export async function walkVault(vaultPath) {
   const out = [];
+  const seenDirs = new Set(); // realpaths — symlink cycle guard
+  try {
+    seenDirs.add(await realpath(vaultPath));
+  } catch {
+    return out; // vault dir missing
+  }
+
   async function walk(dir) {
     let entries;
     try {
@@ -19,11 +29,35 @@ export async function walkVault(vaultPath) {
     for (const e of entries) {
       if (e.name.startsWith(".")) continue; // .obsidian, .trash, .git …
       const p = join(dir, e.name);
-      if (e.isDirectory()) await walk(p);
-      else if (e.isFile() && e.name.endsWith(".md")) {
+      let isDir = e.isDirectory();
+      let isFile = e.isFile();
+      if (e.isSymbolicLink()) {
+        try {
+          const s = await stat(p); // follows the link
+          isDir = s.isDirectory();
+          isFile = s.isFile();
+        } catch {
+          continue; // broken link
+        }
+      }
+      if (isDir) {
+        try {
+          const real = await realpath(p);
+          if (seenDirs.has(real)) continue;
+          seenDirs.add(real);
+        } catch {
+          continue;
+        }
+        await walk(p);
+      } else if (isFile && e.name.endsWith(".md")) {
         try {
           const s = await stat(p);
-          out.push({ path: p, rel: relative(vaultPath, p).split(sep).join("/"), mtime: s.mtimeMs });
+          out.push({
+            path: p,
+            rel: relative(vaultPath, p).split(sep).join("/"),
+            mtime: s.mtimeMs,
+            size: s.size,
+          });
         } catch { /* deleted mid-walk */ }
       }
     }
@@ -54,7 +88,7 @@ export async function loadIndex(indexPath, { model, vault } = {}) {
     const db = JSON.parse(await readFile(indexPath, "utf8"));
     if (db.version !== INDEX_VERSION) return null; // format change → rebuild
     if (model && db.model !== model) return null;  // model change → rebuild
-    if (vault && db.vault !== vault) return null;  // different vault at same path (shouldn't happen)
+    if (vault && db.vault !== vault) return null;
     return db;
   } catch {
     return null; // corrupt → rebuild
@@ -68,47 +102,48 @@ export async function saveIndex(indexPath, db) {
   await rename(tmp, indexPath); // atomic on same filesystem
 }
 
+function fileMetaChanged(prev, f) {
+  if (!prev) return true;
+  // Legacy format stored a bare mtime number; treat as changed to upgrade entry.
+  if (typeof prev === "number") return true;
+  return prev.mtime !== f.mtime || prev.size !== f.size;
+}
+
 /**
- * Reconcile the index with the vault on disk. Mutates `db`.
+ * Reconcile the index with the vault on disk. Mutates `db` ONLY on full success.
  * Returns { changedFiles, deletedChunks, newChunks } — all 0 means no drift.
+ * Throws (leaving db untouched) if embedding fails, so callers can retry later.
  */
 export async function reconcile(db, cfg, { onProgress } = {}) {
   const files = await walkVault(cfg.vault);
   const current = new Map(files.map(f => [f.rel, f]));
 
-  // 1) drop chunks of deleted notes
-  const before = db.records.length;
-  db.records = db.records.filter(r => current.has(r.path));
-  for (const rel of Object.keys(db.files)) {
-    if (!current.has(rel)) delete db.files[rel];
+  const deletedRels = new Set(Object.keys(db.files).filter(rel => !current.has(rel)));
+  const changed = files.filter(f => fileMetaChanged(db.files[f.rel], f));
+
+  if (changed.length === 0 && deletedRels.size === 0) {
+    return { changedFiles: 0, deletedChunks: 0, newChunks: 0 };
   }
-  const deletedChunks = before - db.records.length;
 
-  // 2) find created/modified notes (mtime drift)
-  const changed = files.filter(f => db.files[f.rel] !== f.mtime);
-  if (changed.length === 0 && deletedChunks === 0) return { changedFiles: 0, deletedChunks: 0, newChunks: 0 };
-
-  // 3) drop old chunks of changed notes, then re-chunk
-  const changedSet = new Set(changed.map(f => f.rel));
-  db.records = db.records.filter(r => !changedSet.has(r.path));
-
+  // --- stage (no db mutation) ----------------------------------------------
   const fresh = [];
+  const newMeta = {};
   for (const f of changed) {
     let raw;
     try {
       raw = await readFile(f.path, "utf8");
     } catch {
-      continue; // deleted between walk and read
+      continue; // vanished between walk and read — next reconcile sees it as deleted
     }
     const title = f.rel.replace(/\.md$/, "");
     for (const [ci, text] of chunkText(raw).entries()) {
       // Prefix the title so short chunks keep note-level context in the vector.
       fresh.push({ title, path: f.rel, chunk: ci, text, _embedText: `# ${title}\n${text}` });
     }
-    db.files[f.rel] = f.mtime;
+    newMeta[f.rel] = { mtime: f.mtime, size: f.size };
   }
 
-  // 4) embed in batches
+  // --- embed (throws on failure → nothing committed) -----------------------
   for (let i = 0; i < fresh.length; i += EMBED_BATCH) {
     const batch = fresh.slice(i, i + EMBED_BATCH);
     const vectors = await embed(batch.map(r => r._embedText), cfg);
@@ -116,6 +151,16 @@ export async function reconcile(db, cfg, { onProgress } = {}) {
     onProgress?.(Math.min(i + EMBED_BATCH, fresh.length), fresh.length);
   }
 
+  // --- commit ---------------------------------------------------------------
+  const replacedSet = new Set(Object.keys(newMeta));
+  let deletedChunks = 0;
+  db.records = db.records.filter(r => {
+    if (deletedRels.has(r.path)) { deletedChunks += 1; return false; }
+    if (replacedSet.has(r.path)) return false; // superseded by fresh chunks
+    return true;
+  });
+  for (const rel of deletedRels) delete db.files[rel];
+  Object.assign(db.files, newMeta);
   db.records.push(...fresh);
   db.count = db.records.length;
   db.lastSync = new Date().toISOString();

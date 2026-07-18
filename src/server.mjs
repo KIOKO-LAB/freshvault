@@ -1,18 +1,23 @@
 // freshvault MCP server (stdio).
 // The vault watcher lives INSIDE this process: whenever a client keeps the server
 // alive, the index keeps itself fresh. On boot, a catch-up reconcile absorbs any
-// edits made while no server was running. If another freshvault process already
-// holds the writer lock, this one runs as a reader and hot-reloads the index file.
-import { watchFile, unwatchFile, statSync } from "node:fs";
+// edits made while no server was running.
+//
+// Multi-process model: the first server on a vault wins the writer lock and
+// indexes; others run as readers that hot-reload the index file. Roles are NOT
+// permanent — readers periodically retry the lock and promote themselves when
+// the writer dies, and a writer that loses a heartbeat race demotes itself.
+import { watchFile, unwatchFile } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { loadIndex, saveIndex, emptyIndex, reconcile } from "./indexer.mjs";
-import { acquireLock, releaseOnExit } from "./lock.mjs";
+import { acquireLock, releaseLock, releaseOnExit, heartbeatLock, HEARTBEAT_MS } from "./lock.mjs";
 import { startWatcher } from "./watcher.mjs";
 import { searchNotes, formatResults } from "./search.mjs";
 import { ollamaUp } from "./ollama.mjs";
 
+const PROMOTE_RETRY_MS = 15_000;
 const log = (...a) => console.error("[freshvault]", ...a);
 
 export async function runServer(cfg) {
@@ -25,58 +30,110 @@ export async function runServer(cfg) {
   const state = {
     role: "reader",
     watcher: null,
+    heartbeat: null,
+    promoteTimer: null,
     reconciling: false,
     pending: false,
+    bootReconcileDone: false,
     lastReconcileAt: db.lastSync ? Date.parse(db.lastSync) : null,
     lastError: null,
   };
+  releaseOnExit(cfg.indexPath); // safe for readers too: only unlinks our own lock
 
-  // --- writer election -------------------------------------------------------
-  if (acquireLock(cfg.indexPath)) {
+  // --- writer role -----------------------------------------------------------
+  const kick = async (reason) => {
+    if (state.role !== "writer") return;
+    if (state.reconciling) { state.pending = true; return; }
+    state.reconciling = true;
+    try {
+      const r = await reconcile(db, cfg);
+      if (r.changedFiles || r.deletedChunks) {
+        await saveIndex(cfg.indexPath, db);
+        log(`reconciled (${reason}): ${r.changedFiles} changed, ${r.deletedChunks} chunks removed, ${r.newChunks} embedded`);
+      }
+      state.lastReconcileAt = Date.now();
+      state.lastError = null;
+    } catch (e) {
+      state.lastError = e.message;
+      log(`reconcile failed (${reason}): ${e.message} — nothing was lost; will retry on next change/sweep`);
+    } finally {
+      state.reconciling = false;
+      if (reason === "boot") state.bootReconcileDone = true;
+      if (state.pending) { state.pending = false; kick("pending"); }
+    }
+  };
+
+  function becomeWriter(reason) {
     state.role = "writer";
-    releaseOnExit(cfg.indexPath);
-
-    const kick = async (reason) => {
-      if (state.reconciling) { state.pending = true; return; }
-      state.reconciling = true;
-      try {
-        const r = await reconcile(db, cfg);
-        if (r.changedFiles || r.deletedChunks) {
-          await saveIndex(cfg.indexPath, db);
-          log(`reconciled (${reason}): ${r.changedFiles} changed, ${r.deletedChunks} chunks removed, ${r.newChunks} embedded`);
-        }
-        state.lastReconcileAt = Date.now();
-        state.lastError = null;
-      } catch (e) {
-        state.lastError = e.message;
-        log(`reconcile failed (${reason}): ${e.message} — will retry on next change/sweep`);
-      } finally {
-        state.reconciling = false;
-        if (state.pending) { state.pending = false; kick("pending"); }
-      }
-    };
-
     state.watcher = startWatcher(cfg.vault, kick, { debounceMs: 4000, sweepMs: 60000 });
-    log(`writer mode · watching ${cfg.vault}${state.watcher.recursiveOk ? "" : " (sweep-only: recursive watch unavailable)"}`);
-    kick("boot"); // catch-up scan, non-blocking
-  } else {
-    // Reader: another server process indexes; we just reload when the file changes.
-    log("reader mode · another freshvault process is the writer");
-    watchFile(cfg.indexPath, { interval: 5000 }, async () => {
-      const fresh = await loadIndex(cfg.indexPath, { model: cfg.model, vault: cfg.vault });
-      if (fresh) {
-        db = fresh;
-        state.lastReconcileAt = db.lastSync ? Date.parse(db.lastSync) : state.lastReconcileAt;
+    state.heartbeat = setInterval(() => {
+      if (!heartbeatLock(cfg.indexPath)) {
+        log("lost writer lock to another process — demoting to reader");
+        becomeReader("demoted");
       }
-    });
-    process.on("exit", () => unwatchFile(cfg.indexPath));
+    }, HEARTBEAT_MS);
+    state.heartbeat.unref?.();
+    log(`writer mode (${reason}) · watching ${cfg.vault}${state.watcher.recursiveOk ? "" : " (sweep-only: recursive watch unavailable)"}`);
+    kick(reason === "promoted" ? "promoted" : "boot"); // catch-up scan, non-blocking
   }
+
+  // --- reader role -----------------------------------------------------------
+  const reloadIndex = async () => {
+    const fresh = await loadIndex(cfg.indexPath, { model: cfg.model, vault: cfg.vault });
+    if (fresh) {
+      db = fresh;
+      state.lastReconcileAt = db.lastSync ? Date.parse(db.lastSync) : state.lastReconcileAt;
+    }
+  };
+
+  function becomeReader(reason) {
+    state.role = "reader";
+    state.watcher?.close();
+    state.watcher = null;
+    clearInterval(state.heartbeat);
+    state.heartbeat = null;
+    state.bootReconcileDone = true; // a writer elsewhere owns freshness
+    watchFile(cfg.indexPath, { interval: 5000 }, reloadIndex);
+    // Re-election: when the writer dies, the first reader to notice takes over.
+    state.promoteTimer = setInterval(() => {
+      if (acquireLock(cfg.indexPath)) {
+        clearInterval(state.promoteTimer);
+        state.promoteTimer = null;
+        unwatchFile(cfg.indexPath, reloadIndex);
+        becomeWriter("promoted");
+      }
+    }, PROMOTE_RETRY_MS);
+    state.promoteTimer.unref?.();
+    log(`reader mode (${reason}) · another freshvault process is the writer`);
+  }
+
+  if (acquireLock(cfg.indexPath)) becomeWriter("boot");
+  else becomeReader("boot");
+
+  // --- shutdown --------------------------------------------------------------
+  let shuttingDown = false;
+  const shutdown = (why) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    log(`shutting down (${why})`);
+    state.watcher?.close();
+    clearInterval(state.heartbeat);
+    clearInterval(state.promoteTimer);
+    unwatchFile(cfg.indexPath, reloadIndex);
+    releaseLock(cfg.indexPath);
+    process.exit(0);
+  };
+  // Without this, fs.watch/watchFile keep the event loop alive after the MCP
+  // client closes stdio — leaving an orphaned, lock-holding process.
+  process.stdin.on("end", () => shutdown("stdin end"));
+  process.stdin.on("close", () => shutdown("stdin close"));
 
   // --- MCP surface -----------------------------------------------------------
   const server = new Server(
     { name: "freshvault", version: "0.1.0" },
     { capabilities: { tools: {} } }
   );
+  server.onclose = () => shutdown("transport closed");
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -113,8 +170,16 @@ export async function runServer(cfg) {
 
     if (name === "search_notes") {
       if (db.records.length === 0) {
+        if (state.bootReconcileDone && Object.keys(db.files).length === 0 && !state.lastError) {
+          return text(
+            `The configured vault contains no markdown notes — check the vault path: ${cfg.vault}\n` +
+            `(freshvault indexes .md files; folders starting with "." are skipped)`
+          );
+        }
         return text(
-          "The vault index is empty. If the server just started on a fresh vault, indexing may still be in progress — try again shortly, or check index_status."
+          state.lastError
+            ? `The index is empty and the last indexing attempt failed: ${state.lastError}\nFix that (usually: start Ollama), then just search again — indexing retries automatically.`
+            : "The vault index is empty. If the server just started on a fresh vault, indexing may still be in progress — try again shortly, or check index_status."
         );
       }
       try {
@@ -127,16 +192,24 @@ export async function runServer(cfg) {
 
     if (name === "index_status") {
       const up = await ollamaUp(cfg.ollamaUrl);
+      const noteCount = Object.keys(db.files).length;
       const lines = [
         `vault: ${cfg.vault}`,
-        `notes: ${Object.keys(db.files).length} · chunks: ${db.records.length}`,
-        `last sync: ${db.lastSync ?? "never"}${state.lastReconcileAt ? ` (${Math.round((Date.now() - state.lastReconcileAt) / 1000)}s ago)` : ""}`,
-        `role: ${state.role}${state.role === "writer" ? ` · watcher: ${state.watcher?.recursiveOk ? "recursive" : "sweep-only"}` : ""}`,
+        `notes: ${noteCount} · chunks: ${db.records.length}`,
+        `last successful sync: ${db.lastSync ?? "never"}`,
+        `last check: ${state.lastReconcileAt ? `${Math.round((Date.now() - state.lastReconcileAt) / 1000)}s ago` : "not yet"}`,
+        `role: ${state.role}${state.role === "writer" ? ` · watcher: ${state.watcher?.recursiveOk ? "recursive" : "sweep-only"}` : " (another process indexes)"}`,
         `reconciling now: ${state.reconciling}`,
-        `embedding: ${cfg.model} via ${cfg.ollamaUrl} (${up ? "reachable" : "UNREACHABLE"})`,
+        `embedding: ${cfg.model} via ${cfg.ollamaUrl} (${up ? "reachable" : "UNREACHABLE — start Ollama"})`,
         `index file: ${cfg.indexPath}`,
       ];
+      if (noteCount === 0 && state.bootReconcileDone && !state.lastError) {
+        lines.push(`note: the vault has no .md files — is the path right?`);
+      }
       if (state.lastError) lines.push(`last error: ${state.lastError}`);
+      if (db.records.length > 20000) {
+        lines.push(`warning: ${db.records.length} chunks — large vault; JSON index may be slow (binary index is on the roadmap)`);
+      }
       return text(lines.join("\n"));
     }
 

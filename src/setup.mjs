@@ -94,36 +94,47 @@ export async function runSetup(cliOpts = {}) {
     }
     say(`\n✓ Ollama reachable at ${cfg.ollamaUrl}`);
 
-    // 3) embedding model
-    if (!(await hasModel(cfg.ollamaUrl, cfg.model))) {
+    // 3) persist config FIRST — even if later steps fail, `serve` can pick up
+    // from here and index on boot.
+    writeConfigFile({ ...readConfigFile(), vault, model: cfg.model, ollamaUrl: cfg.ollamaUrl });
+    say(`✓ Config saved`);
+
+    // 4) embedding model
+    let modelReady = await hasModel(cfg.ollamaUrl, cfg.model);
+    if (!modelReady) {
       const yn = (await rl.question(`Embedding model "${cfg.model}" is not pulled yet (~1.2GB for ${DEFAULT_MODEL}). Pull now? [Y/n] `)).trim().toLowerCase();
       if (yn === "" || yn === "y" || yn === "yes") {
         const r = spawnSync("ollama", ["pull", cfg.model], { stdio: ["ignore", "inherit", "inherit"], shell: isWin });
-        if (r.status !== 0) {
-          say(`ollama pull failed — run \`ollama pull ${cfg.model}\` manually, then re-run setup.`);
-          process.exitCode = 1;
-          return;
-        }
-      } else {
-        say(`Skipping. Pull it later with: ollama pull ${cfg.model}`);
+        modelReady = r.status === 0 && (await hasModel(cfg.ollamaUrl, cfg.model));
+        if (!modelReady) say(`ollama pull did not complete — run \`ollama pull ${cfg.model}\` manually later.`);
       }
     }
-    say(`✓ Embedding model: ${cfg.model}`);
 
-    // 4) initial index
+    // 5) initial index (skipped gracefully when the model isn't there yet —
+    // the server indexes on boot once the model exists)
     const indexPath = indexPathFor(vault, cfg.dataDir);
-    const db = (await loadIndex(indexPath, { model: cfg.model, vault })) ?? emptyIndex(cfg.model, vault);
-    say("\nIndexing vault (one-time; later updates are automatic)…");
-    const res = await reconcile(db, { ...cfg, vault, indexPath }, {
-      onProgress: (done, total) => process.stderr.write(`\r  embedding ${done}/${total} chunks`),
-    });
-    if (res.newChunks) say("");
-    await saveIndex(indexPath, db);
-    say(`✓ Indexed: ${Object.keys(db.files).length} notes / ${db.records.length} chunks`);
-
-    // 5) persist config
-    writeConfigFile({ ...readConfigFile(), vault, model: cfg.model, ollamaUrl: cfg.ollamaUrl });
-    say(`✓ Config saved`);
+    if (modelReady) {
+      say(`✓ Embedding model: ${cfg.model}`);
+      try {
+        const db = (await loadIndex(indexPath, { model: cfg.model, vault })) ?? emptyIndex(cfg.model, vault);
+        say("\nIndexing vault (one-time; later updates are automatic)…");
+        const res = await reconcile(db, { ...cfg, vault, indexPath }, {
+          onProgress: (done, total) => process.stderr.write(`\r  embedding ${done}/${total} chunks`),
+        });
+        if (res.newChunks) say("");
+        await saveIndex(indexPath, db);
+        const noteCount = Object.keys(db.files).length;
+        say(`✓ Indexed: ${noteCount} notes / ${db.records.length} chunks`);
+        if (noteCount === 0) say(`  (no .md files found in ${vault} — is that the right folder?)`);
+        if (db.records.length > 20000) say(`  warning: large vault — JSON index may be slow; binary index is on the roadmap`);
+      } catch (e) {
+        say(`\nInitial indexing failed: ${e.message}`);
+        say("Not a problem — the server will index automatically on first run once this is fixed.");
+      }
+    } else {
+      say(`Skipping initial index. When ready: ollama pull ${cfg.model}`);
+      say("The server will build the index automatically on its first run after that.");
+    }
 
     // 6) register with Claude
     say("");

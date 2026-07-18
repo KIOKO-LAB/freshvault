@@ -4,41 +4,51 @@ export async function embed(texts, { ollamaUrl, model }) {
   if (arr.length === 0) return [];
 
   // Modern batch API
+  let resp;
   try {
-    const r = await fetch(`${ollamaUrl}/api/embed`, {
+    resp = await fetch(`${ollamaUrl}/api/embed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model, input: arr }),
     });
-    if (r.ok) {
-      const j = await r.json();
-      if (Array.isArray(j.embeddings) && j.embeddings.length === arr.length) return j.embeddings;
-    } else if (r.status === 404) {
-      // fall through to legacy endpoint
-    } else {
-      throw new Error(`ollama /api/embed ${r.status}: ${await safeText(r)}`);
-    }
   } catch (e) {
-    if (!isConnRefused(e)) {
-      // real API error or legacy-needed: try legacy below only on 404-ish paths
-      if (!(e instanceof TypeError)) throw e;
-    } else {
-      throw new Error(`Cannot reach Ollama at ${ollamaUrl} — is it running? (${e.cause?.code ?? e.message})`);
-    }
+    throw connError(e, ollamaUrl); // fetch throws = network-level failure
+  }
+  if (resp.ok) {
+    const j = await resp.json();
+    if (Array.isArray(j.embeddings) && j.embeddings.length === arr.length) return j.embeddings;
+    throw new Error("ollama /api/embed returned a malformed response");
+  }
+  if (resp.status !== 404) {
+    throw new Error(`ollama /api/embed ${resp.status}: ${await safeText(resp)}`);
   }
 
-  // Legacy single-prompt API
+  // 404 → either an old Ollama without /api/embed, or an unknown model.
+  // The legacy endpoint disambiguates: old Ollama serves it; unknown model
+  // fails there too with Ollama's own "try pulling it" message.
   const out = [];
   for (const t of arr) {
-    const r = await fetch(`${ollamaUrl}/api/embeddings`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, prompt: t }),
-    });
+    let r;
+    try {
+      r = await fetch(`${ollamaUrl}/api/embeddings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model, prompt: t }),
+      });
+    } catch (e) {
+      throw connError(e, ollamaUrl);
+    }
     if (!r.ok) throw new Error(`ollama /api/embeddings ${r.status}: ${await safeText(r)}`);
-    out.push((await r.json()).embedding);
+    const j = await r.json();
+    if (!Array.isArray(j.embedding)) throw new Error("ollama /api/embeddings returned a malformed response");
+    out.push(j.embedding);
   }
   return out;
+}
+
+function connError(e, ollamaUrl) {
+  const code = e?.cause?.code ?? e?.code ?? e?.message;
+  return new Error(`Cannot reach Ollama at ${ollamaUrl} — is it running? (${code})`);
 }
 
 export async function ollamaUp(ollamaUrl) {
@@ -71,11 +81,6 @@ export function cosine(a, b) {
     nb += b[i] * b[i];
   }
   return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-8);
-}
-
-function isConnRefused(e) {
-  const code = e?.cause?.code ?? e?.code;
-  return code === "ECONNREFUSED" || code === "ENOTFOUND" || code === "UND_ERR_CONNECT_TIMEOUT";
 }
 
 async function safeText(r) {

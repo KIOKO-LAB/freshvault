@@ -88,3 +88,37 @@ test("model mismatch invalidates the index", async () => {
   const db = await loadIndex(cfg.indexPath, { model: "other-model", vault });
   assert.equal(db, null);
 });
+
+test("TRANSACTIONAL: embed failure leaves db untouched and drift is re-detected", async () => {
+  const db = emptyIndex("mock-model", vault);
+  await reconcile(db, cfg); // baseline index
+  const chunksBefore = db.records.length;
+  const filesBefore = JSON.stringify(db.files);
+
+  await writeFile(join(vault, "cooking.md"), "# Cooking\nEntirely new content about sous vide temperature control.");
+  const future = new Date(Date.now() + 4000);
+  await utimes(join(vault, "cooking.md"), future, future);
+
+  // Ollama "down": unreachable endpoint → reconcile must throw and NOT mutate db
+  const brokenCfg = { ...cfg, ollamaUrl: "http://127.0.0.1:9" };
+  await assert.rejects(() => reconcile(db, brokenCfg));
+  assert.equal(db.records.length, chunksBefore, "records must be untouched after failure");
+  assert.equal(JSON.stringify(db.files), filesBefore, "file bookkeeping must be untouched after failure");
+
+  // Ollama "back up": the SAME drift must be re-detected and indexed
+  const r = await reconcile(db, cfg);
+  assert.equal(r.changedFiles, 1, "failed file must be retried, not marked as done");
+  assert.ok(db.records.some(rec => rec.path === "cooking.md" && rec.text.includes("sous vide")));
+});
+
+test("size change with identical mtime is still detected as drift", async () => {
+  const db = emptyIndex("mock-model", vault);
+  await reconcile(db, cfg);
+  // Simulate a coarse-mtime filesystem: rewrite content, force the OLD mtime back
+  const meta = db.files["sub/travel.md"];
+  await writeFile(join(vault, "sub", "travel.md"), "# Travel\nCompletely different itinerary: Kyushu onsen circuit."); // different length
+  const old = new Date(meta.mtime);
+  await utimes(join(vault, "sub", "travel.md"), old, old);
+  const r = await reconcile(db, cfg);
+  assert.equal(r.changedFiles, 1, "same-mtime different-size rewrite must be reindexed");
+});
