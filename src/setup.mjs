@@ -27,14 +27,18 @@ function obsidianConfigCandidates() {
   }
 }
 
-export function detectVaults() {
-  for (const p of obsidianConfigCandidates()) {
+export function detectVaults(candidates = obsidianConfigCandidates()) {
+  for (const p of candidates) {
     if (!existsSync(p)) continue;
+    const configDir = resolve(p, "..");
     try {
       const j = JSON.parse(readFileSync(p, "utf8"));
       const vaults = Object.values(j.vaults ?? {})
         .map(v => v.path)
-        .filter(v => v && existsSync(v));
+        .filter(v => v && existsSync(v))
+        // Skip Obsidian's built-in demo vault ("Obsidian Sandbox") and anything
+        // else living inside Obsidian's own config dir — never a user's vault.
+        .filter(v => !resolve(v).startsWith(configDir));
       if (vaults.length) return vaults;
     } catch { /* try next */ }
   }
@@ -49,6 +53,22 @@ function commandExists(cmd) {
 export async function runSetup(cliOpts = {}) {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   const say = (s = "") => console.error(s);
+  // Piped/EOF-closed stdin must degrade to defaults, never crash (ERR_USE_AFTER_CLOSE).
+  let rlClosed = false;
+  rl.on("close", () => { rlClosed = true; });
+  const ask = async (q, def = "") => {
+    if (rlClosed) return def;
+    try {
+      return await rl.question(q);
+    } catch {
+      rlClosed = true;
+      return def;
+    }
+  };
+  const yes = async (q) => {
+    const a = (await ask(q, "y")).trim().toLowerCase();
+    return a === "" || a === "y" || a === "yes";
+  };
   try {
     say("");
     say("freshvault setup — your vault becomes Claude's memory");
@@ -59,18 +79,27 @@ export async function runSetup(cliOpts = {}) {
     if (!vault) {
       const found = detectVaults();
       if (found.length === 1) {
-        const yn = (await rl.question(`Found Obsidian vault: ${found[0]}\nUse it? [Y/n] `)).trim().toLowerCase();
-        if (yn === "" || yn === "y" || yn === "yes") vault = found[0];
+        if (await yes(`Found Obsidian vault: ${found[0]}\nUse it? [Y/n] `)) vault = found[0];
       } else if (found.length > 1) {
         say("Found Obsidian vaults:");
         found.forEach((v, i) => say(`  ${i + 1}. ${v}`));
-        const pick = Number((await rl.question(`Which one? [1-${found.length}] `)).trim());
-        if (pick >= 1 && pick <= found.length) vault = found[pick - 1];
+        while (!vault && !rlClosed) {
+          const raw = (await ask(`Which one? [1-${found.length}] `)).trim();
+          const pick = Number(raw);
+          if (Number.isInteger(pick) && pick >= 1 && pick <= found.length) vault = found[pick - 1];
+          else say(`  Enter a number between 1 and ${found.length} (or Ctrl+C and re-run with --vault <path>).`);
+        }
       }
-      while (!vault) {
-        const manual = (await rl.question("Path to your vault (folder with .md notes): ")).trim();
+      while (!vault && !rlClosed) {
+        const manual = (await ask("Path to your vault (folder with .md notes): ")).trim();
         if (manual && existsSync(resolve(manual))) vault = resolve(manual);
         else say("  That path doesn't exist — try again.");
+      }
+      if (!vault) {
+        say("\nNo vault chosen (input closed). Re-run with an explicit path:");
+        say("  npx -y freshvault setup --vault /path/to/vault");
+        process.exitCode = 1;
+        return;
       }
     }
     vault = resolve(vault);
@@ -102,8 +131,7 @@ export async function runSetup(cliOpts = {}) {
     // 4) embedding model
     let modelReady = await hasModel(cfg.ollamaUrl, cfg.model);
     if (!modelReady) {
-      const yn = (await rl.question(`Embedding model "${cfg.model}" is not pulled yet (~1.2GB for ${DEFAULT_MODEL}). Pull now? [Y/n] `)).trim().toLowerCase();
-      if (yn === "" || yn === "y" || yn === "yes") {
+      if (await yes(`Embedding model "${cfg.model}" is not pulled yet (~1.2GB for ${DEFAULT_MODEL}). Pull now? [Y/n] `)) {
         const r = spawnSync("ollama", ["pull", cfg.model], { stdio: ["ignore", "inherit", "inherit"], shell: isWin });
         modelReady = r.status === 0 && (await hasModel(cfg.ollamaUrl, cfg.model));
         if (!modelReady) say(`ollama pull did not complete — run \`ollama pull ${cfg.model}\` manually later.`);
@@ -140,8 +168,7 @@ export async function runSetup(cliOpts = {}) {
     say("");
     const addCmd = ["mcp", "add", "freshvault", "-s", "user", "--", "npx", "-y", "freshvault", "serve"];
     if (commandExists("claude")) {
-      const yn = (await rl.question(`Register with Claude Code now? (runs: claude ${addCmd.join(" ")}) [Y/n] `)).trim().toLowerCase();
-      if (yn === "" || yn === "y" || yn === "yes") {
+      if (await yes(`Register with Claude Code now? (runs: claude ${addCmd.join(" ")}) [Y/n] `)) {
         const r = spawnSync("claude", addCmd, { stdio: ["ignore", "inherit", "inherit"], shell: isWin });
         say(r.status === 0 ? "✓ Registered with Claude Code" : "Registration failed — run the command above manually.");
       }
