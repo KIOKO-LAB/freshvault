@@ -19,21 +19,20 @@ jobs:
           # .npmrc, which silently breaks OIDC trusted publishing.
       - run: npm ci
       - run: npm test
-      # Publish: try Trusted Publishing (OIDC, tokenless) first; fall back to
-      # NPM_TOKEN if the trusted publisher isn't configured. Whichever exists wins.
+      # Publish via Trusted Publishing (OIDC, tokenless). Idempotent: skip if
+      # this version is already on npm, so tag re-pushes never double-publish.
       - run: npm install -g npm@latest
-      - name: Publish (OIDC trusted publishing)
-        id: oidc
-        continue-on-error: true
-        run: npm publish --access public
-      - name: Publish (token fallback)
-        if: steps.oidc.outcome == 'failure'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Check if version already published
+        id: check
         run: |
-          echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}" > ~/.npmrc
-          echo "token authenticates as: $(npm whoami || echo '<invalid token>')"
-          npm publish --access public
+          V=$(node -p "require('./package.json').version")
+          if [ "$(npm view freshvault@$V version 2>/dev/null)" = "$V" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "freshvault@$V already on npm — skipping publish"
+          fi
+      - name: Publish (OIDC trusted publishing)
+        if: steps.check.outputs.skip != 'true'
+        run: npm publish --access public
 
       # Publish to the official MCP registry (aggregators auto-sync from it)
       - name: Install mcp-publisher
