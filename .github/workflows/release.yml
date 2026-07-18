@@ -18,9 +18,10 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm test
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Trusted Publishing (OIDC): no token needed. Requires npm >= 11.5.1
+      # and the repo+workflow registered as a Trusted Publisher on npmjs.com.
+      - run: npm install -g npm@latest
+      - run: npm publish --access public
 
       # Publish to the official MCP registry (aggregators auto-sync from it)
       - name: Install mcp-publisher
