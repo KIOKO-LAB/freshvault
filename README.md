@@ -1,5 +1,10 @@
 # freshvault
 
+[![CI](https://github.com/KIOKO-LAB/freshvault/actions/workflows/ci.yml/badge.svg)](https://github.com/KIOKO-LAB/freshvault/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/freshvault)](https://www.npmjs.com/package/freshvault)
+[![MCP Registry](https://img.shields.io/badge/MCP_registry-io.github.KIOKO--LAB%2Ffreshvault-blue)](https://registry.modelcontextprotocol.io/v0/servers?search=freshvault)
+![node](https://img.shields.io/node/v/freshvault)
+
 **Your Obsidian vault is Claude's memory. Always fresh, always local.**
 
 Every other vault-search MCP makes you re-run an index command, babysit a watch terminal, or click "Update Index" in a web UI. freshvault watches your vault from *inside* the MCP server: edit a note, and Claude sees it seconds later. Automatically. Forever.
