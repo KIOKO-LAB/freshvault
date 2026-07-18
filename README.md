@@ -4,6 +4,8 @@
 
 Every other vault-search MCP makes you re-run an index command, babysit a watch terminal, or click "Update Index" in a web UI. freshvault watches your vault from *inside* the MCP server: edit a note, and Claude sees it seconds later. Automatically. Forever.
 
+![freshvault demo: save a note, the watcher reindexes it automatically, semantic search finds it seconds later](https://raw.githubusercontent.com/KIOKO-LAB/freshvault/main/docs/demo.gif)
+
 - 🔄 **Never reindex** — the file watcher lives in the server process; boot catch-up absorbs offline edits
 - 🔒 **100% local** — embeddings via Ollama (`bge-m3`), your notes never leave your machine
 - 🌏 **Multilingual by default** — `bge-m3` handles Korean, Japanese, and 100+ languages that English-only defaults fail on
