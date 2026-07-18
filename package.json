@@ -1,0 +1,43 @@
+{
+  "name": "freshvault",
+  "version": "0.1.0",
+  "description": "Your Obsidian vault is Claude's memory — local semantic search over your notes via MCP, always fresh, never reindex.",
+  "type": "module",
+  "bin": {
+    "freshvault": "bin/freshvault.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "obsidian",
+    "rag",
+    "semantic-search",
+    "claude",
+    "local-first",
+    "ollama",
+    "embeddings",
+    "memory"
+  ],
+  "mcpName": "io.github.kioko-lab/freshvault",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KIOKO-LAB/freshvault.git"
+  },
+  "author": "Kioko Lab",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
