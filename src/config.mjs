@@ -8,7 +8,7 @@ export const DEFAULT_MODEL = "bge-m3";
 export const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 export const CHUNK_CHARS = 1000;
 export const CHUNK_OVERLAP = 150;
-export const INDEX_VERSION = 2; // v2: files map stores {mtime, size} (was bare mtime)
+export const INDEX_VERSION = 3; // v3: vectors in Float32 .bin sidecar (was inline JSON)
 
 export function configDir() {
   if (platform() === "win32") {
@@ -62,10 +62,21 @@ export function loadConfig(cliOpts = {}) {
   const model = cliOpts.model ?? process.env.FRESHVAULT_MODEL ?? file.model ?? DEFAULT_MODEL;
   const ollamaUrl = (cliOpts.ollamaUrl ?? process.env.FRESHVAULT_OLLAMA_URL ?? file.ollamaUrl ?? DEFAULT_OLLAMA_URL).replace(/\/+$/, "");
   const data = cliOpts.data ?? process.env.FRESHVAULT_DATA ?? file.data ?? dataDir();
+  // Embedding provider: "ollama" (default) or "openai" (LM Studio / LiteLLM /
+  // any OpenAI-compatible /v1/embeddings endpoint).
+  const embedApi = process.env.FRESHVAULT_EMBED_API ?? file.embedApi ?? "ollama";
+  const embedUrl = (process.env.FRESHVAULT_EMBED_URL ?? file.embedUrl ?? "http://localhost:1234").replace(/\/+$/, "");
+  const embedKey = process.env.FRESHVAULT_EMBED_KEY ?? null; // env-only by design — never persisted
+  if (file.embedKey) {
+    console.error("[freshvault] warning: embedKey in config.json is ignored — set FRESHVAULT_EMBED_KEY in the environment instead");
+  }
   return {
     vault: vault ? resolve(vault) : null,
     model,
     ollamaUrl,
+    embedApi,
+    embedUrl,
+    embedKey,
     dataDir: data,
     indexPath: vault ? indexPathFor(vault, data) : null,
   };

@@ -76,11 +76,11 @@ after(async () => {
   await rm(dataDir, { recursive: true, force: true });
 });
 
-test("tools/list exposes search_notes and index_status with read-only annotations", async () => {
+test("tools/list exposes the three tools with read-only annotations", async () => {
   const res = await send("tools/list");
   const tools = res.result.tools;
   const names = tools.map(t => t.name).sort();
-  assert.deepEqual(names, ["index_status", "search_notes"]);
+  assert.deepEqual(names, ["get_note_context", "index_status", "search_notes"]);
   assert.ok(tools.every(t => t.annotations?.readOnlyHint === true));
 });
 
@@ -105,6 +105,32 @@ test("CORE PROMISE: a newly created note becomes searchable automatically", asyn
     found = res.result.content[0].text.includes("stargazing");
   }
   assert.ok(found, "new note should be searchable without any manual reindex");
+});
+
+test("get_note_context returns the full note, blocks path traversal", async () => {
+  const res = await send("tools/call", { name: "get_note_context", arguments: { path: "recipes.md" } });
+  const text = res.result.content[0].text;
+  assert.match(text, /Bibimbap needs gochujang/);
+  assert.match(text, /indexed chunks/);
+
+  const evil = await send("tools/call", { name: "get_note_context", arguments: { path: "../../../etc/passwd.md" } });
+  assert.match(evil.result.content[0].text, /Invalid path/);
+
+  // dot-segment paths (mirrors indexer exclusions) are rejected
+  const dot = await send("tools/call", { name: "get_note_context", arguments: { path: ".obsidian/whatever.md" } });
+  assert.match(dot.result.content[0].text, /Invalid path/);
+
+  // symlink escape: a link inside the vault pointing outside must be refused
+  try {
+    const { symlink, writeFile: wf } = await import("node:fs/promises");
+    const outside = join(tmpdir(), `fv-outside-${Date.now()}.md`);
+    await wf(outside, "secret outside the vault");
+    await symlink(outside, join(vault, "sneaky.md"));
+    const res2 = await send("tools/call", { name: "get_note_context", arguments: { path: "sneaky.md" } });
+    assert.match(res2.result.content[0].text, /outside the vault/);
+  } catch (e) {
+    if (e.code !== "EPERM") throw e; // Windows CI may lack symlink privilege — skip silently
+  }
 });
 
 test("index_status reports writer role and freshness", async () => {

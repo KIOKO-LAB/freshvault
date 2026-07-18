@@ -1,6 +1,6 @@
 {
   "name": "freshvault",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Your Obsidian vault is Claude's memory — local semantic search over your notes via MCP, always fresh, never reindex.",
   "type": "module",
   "bin": {
@@ -13,7 +13,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test tests/indexer.test.mjs tests/lock.test.mjs tests/watcher.test.mjs tests/mcp-e2e.test.mjs tests/promotion.e2e.test.mjs tests/setup.test.mjs"
+    "test": "node --test tests/indexer.test.mjs tests/lock.test.mjs tests/watcher.test.mjs tests/mcp-e2e.test.mjs tests/promotion.e2e.test.mjs tests/setup.test.mjs tests/providers.test.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

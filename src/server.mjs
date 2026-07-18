@@ -8,6 +8,8 @@
 // permanent — readers periodically retry the lock and promote themselves when
 // the writer dies, and a writer that loses a heartbeat race demotes itself.
 import { watchFile, unwatchFile } from "node:fs";
+import { readFile, realpath } from "node:fs/promises";
+import { resolve, sep } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -15,7 +17,7 @@ import { loadIndex, saveIndex, emptyIndex, reconcile } from "./indexer.mjs";
 import { acquireLock, releaseLock, releaseOnExit, heartbeatLock, HEARTBEAT_MS } from "./lock.mjs";
 import { startWatcher } from "./watcher.mjs";
 import { searchNotes, formatResults } from "./search.mjs";
-import { ollamaUp } from "./ollama.mjs";
+import { embedEndpointUp } from "./ollama.mjs";
 
 const PROMOTE_RETRY_MS = 15_000;
 const log = (...a) => console.error("[freshvault]", ...a);
@@ -47,6 +49,12 @@ export async function runServer(cfg) {
     state.reconciling = true;
     try {
       const r = await reconcile(db, cfg);
+      // A long reconcile can outlast a heartbeat demotion — a demoted ex-writer
+      // must never save over the newly promoted writer's index.
+      if (state.role !== "writer") {
+        log(`demoted during reconcile (${reason}) — discarding result`);
+        return;
+      }
       if (r.changedFiles || r.deletedChunks) {
         await saveIndex(cfg.indexPath, db);
         log(`reconciled (${reason}): ${r.changedFiles} changed, ${r.deletedChunks} chunks removed, ${r.newChunks} embedded`);
@@ -130,7 +138,7 @@ export async function runServer(cfg) {
 
   // --- MCP surface -----------------------------------------------------------
   const server = new Server(
-    { name: "freshvault", version: "0.1.0" },
+    { name: "freshvault", version: "0.2.0" },
     { capabilities: { tools: {} } }
   );
   server.onclose = () => shutdown("transport closed");
@@ -153,6 +161,21 @@ export async function runServer(cfg) {
           required: ["query"],
         },
         annotations: { title: "Search vault notes", readOnlyHint: true, openWorldHint: false },
+      },
+      {
+        name: "get_note_context",
+        description:
+          "Read a FULL note from the vault by its path (as returned in search_notes " +
+          "results' `source:` field). Use after a search hit when the chunk isn't " +
+          "enough and you need the complete note.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            path: { type: "string", description: "Note path relative to the vault root, e.g. 'sub/travel.md'" },
+          },
+          required: ["path"],
+        },
+        annotations: { title: "Read full note", readOnlyHint: true, openWorldHint: false },
       },
       {
         name: "index_status",
@@ -178,7 +201,7 @@ export async function runServer(cfg) {
         }
         return text(
           state.lastError
-            ? `The index is empty and the last indexing attempt failed: ${state.lastError}\nFix that (usually: start Ollama), then just search again — indexing retries automatically.`
+            ? `The index is empty and the last indexing attempt failed: ${state.lastError}\nFix that (usually: start your embedding server), then just search again — indexing retries automatically.`
             : "The vault index is empty. If the server just started on a fresh vault, indexing may still be in progress — try again shortly, or check index_status."
         );
       }
@@ -186,12 +209,39 @@ export async function runServer(cfg) {
         const results = await searchNotes(db, cfg, String(args.query ?? ""), clampTopK(args.top_k));
         return text(formatResults(results, db, state));
       } catch (e) {
-        return text(`Search failed: ${e.message}\nIf Ollama is not running, start it and try again.`);
+        return text(`Search failed: ${e.message}\nIf your embedding server (Ollama or OpenAI-compatible) is not running, start it and try again.`);
+      }
+    }
+
+    if (name === "get_note_context") {
+      const rel = String(args.path ?? "");
+      const abs = resolve(cfg.vault, rel);
+      // Containment: lexical check + dot-segment exclusion (mirror the indexer:
+      // .obsidian/.trash/.git are never indexed, so never readable here either).
+      if (
+        !abs.startsWith(resolve(cfg.vault) + sep) ||
+        !abs.endsWith(".md") ||
+        rel.split(/[\\/]/).some(p => p.startsWith("."))
+      ) {
+        return text(`Invalid path: "${rel}" — must be a .md path inside the vault (use the "source:" value from search_notes results).`);
+      }
+      try {
+        // Symlink guard: the real target must also live inside the (real) vault.
+        const [realFile, realVault] = await Promise.all([realpath(abs), realpath(resolve(cfg.vault))]);
+        if (!realFile.startsWith(realVault + sep)) {
+          return text(`Invalid path: "${rel}" — resolves outside the vault.`);
+        }
+        const raw = await readFile(abs, "utf8");
+        const capped = raw.length > 12000 ? raw.slice(0, 12000) + `\n\n[…truncated — note is ${raw.length} chars]` : raw;
+        const inIndex = db.records.filter(r => r.path === rel).length;
+        return text(`# ${rel}\n(${raw.length} chars · ${inIndex} indexed chunks)\n\n${capped}`);
+      } catch (e) {
+        return text(`Could not read "${rel}": ${e.code === "ENOENT" ? "note does not exist (was it renamed/deleted?)" : e.message}`);
       }
     }
 
     if (name === "index_status") {
-      const up = await ollamaUp(cfg.ollamaUrl);
+      const up = await embedEndpointUp(cfg);
       const noteCount = Object.keys(db.files).length;
       const lines = [
         `vault: ${cfg.vault}`,
@@ -200,7 +250,7 @@ export async function runServer(cfg) {
         `last check: ${state.lastReconcileAt ? `${Math.round((Date.now() - state.lastReconcileAt) / 1000)}s ago` : "not yet"}`,
         `role: ${state.role}${state.role === "writer" ? ` · watcher: ${state.watcher?.recursiveOk ? "recursive" : "sweep-only"}` : " (another process indexes)"}`,
         `reconciling now: ${state.reconciling}`,
-        `embedding: ${cfg.model} via ${cfg.ollamaUrl} (${up ? "reachable" : "UNREACHABLE — start Ollama"})`,
+        `embedding: ${cfg.model} via ${cfg.embedApi === "openai" ? cfg.embedUrl + " (openai-compatible)" : cfg.ollamaUrl} (${up ? "reachable" : "UNREACHABLE — start your embedding server"})`,
         `index file: ${cfg.indexPath}`,
       ];
       if (noteCount === 0 && state.bootReconcileDone && !state.lastError) {
